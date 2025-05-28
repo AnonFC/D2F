@@ -2,6 +2,8 @@
 
 # Disambiguation and Decomposition Fact-checking (D2F) framework.
 
+## The appendix (i.e., supplementary material) is included in the file [Appendix.pdf](Appendix.pdf) file.
+
 ## About
 
 ![Overview of D2F](overview.jpg)
@@ -39,12 +41,8 @@ python D2F.py --data_set RAWFC
 
 The prompts used for the LLM-based baselines are available in the work of [Zhang et al.](https://aclanthology.org/2023.ijcnlp-main.64/), while the prompts for D2F can be found here:
 
-- [Disambiguating](prompts/FindAmbiguity.md)
-- [Fact-checking](prompts/FactChecking.md)
-
-## Appendix
-
-Appendix can be found in the [Appendix.pdf](Appendix.pdf) file.
+- [Disambiguating](prompts/FindAmbiguity.md). Used to identify ambiguities in claims and provide disambiguations.
+- [Fact-checking](prompts/FactChecking.md). Complete fact-checking workflow, including disambiguating, decomposing, and verifying.
 
 
 ## Acknowledgments

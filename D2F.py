@@ -7,17 +7,22 @@ from IPython.utils import io
 import urllib.request
 from datetime import datetime
 import openai
+from openai import OpenAI
 from serpapi import GoogleSearch
 from tqdm import tqdm
 from config import *
 from sklearn.metrics import f1_score, accuracy_score, recall_score, precision_score, classification_report
 from argparse import ArgumentParser, Namespace
 import argparse
+from utils import *
+from pydantic import BaseModel
 
-openai.api_key = OPENAI_API_KEY
-serpapi_key = SERPAPI_KEY
+cache_path = 'data/cache'
+os.makedirs(cache_path, exist_ok=True)
 
-error_log_file = 'logs/mylog.txt'
+NOW_TIME = datetime.now().strftime('%Y-%m-%d-%H-%M')
+error_log_file = '{}.log'.format(NOW_TIME)
+
 if not os.path.exists(error_log_file):
     os.makedirs(os.path.dirname(error_log_file), exist_ok=True)
     with open(error_log_file, 'w') as f:
@@ -26,102 +31,6 @@ if not os.path.exists(error_log_file):
 def my_log(txt):
     with open(error_log_file, 'a') as f:
         f.write(txt + '\n')
-
-
-def call_gpt(cur_prompt, stop=["\n"]):
-    reasoner_messages = [{"role": "user", "content": cur_prompt}]
-    print("-------- call gpt --------")
-    print(reasoner_messages)
-    completion = openai.ChatCompletion.create(
-        # model="gpt-3.5-turbo",
-        model="gpt-4o-2024-05-13",
-        messages=reasoner_messages,
-        # stop=stop
-    )
-    returned = completion['choices'][0]["message"]["content"]
-    print("-------- returned start --------")
-    print(returned)
-    print("-------- returned end   --------")
-    return returned
-
-
-def serp_search(query):
-    params = {
-        "api_key": serpapi_key,
-        "engine": "google",
-        "q": query,
-        "google_domain": "google.com",
-        "gl": "us",
-        "hl": "en"
-    }
-    res = None
-    with io.capture_output() as captured:  # disables prints from GoogleSearch
-        search = GoogleSearch(params)
-        res = search.get_dict()
-    return res
-
-def is_social_media(link):
-    sites = ['mobile.twitter.com',
-        'twitter.com',
-        'x.com',
-        'toolbox.google.com',
-        'reddit.com',
-        'snopes.com',
-        'facebook.com',
-        'instagram.com',
-        'linkedin.com',
-        'pinterest.com',
-        'snapchat.com',
-        'tumblr.com',
-        'tiktok.com',
-        'youtube.com',
-        'vimeo.com',
-        'whatsapp.com',
-        'quora.com',
-        'weibo.com',
-        'yelp.com',
-        'sina.com.cn',
-        'snopes.com',
-        'politifact.com',
-        'www.truthorfiction.com',
-        'www.factcheck.org',
-        'fullfact.org',
-        'apnews.com',
-        'uk.reuters.com',
-    ]
-    for site in sites:
-        if site in link:
-            return True
-    return False
-
-def get_answer(question):
-    params = {
-        "api_key": serpapi_key,
-        "engine": "google",
-        "q": question,
-        "google_domain": "google.com",
-        "gl": "us",
-        "hl": "en"
-    }
-    with io.capture_output() as captured:  # disables prints from GoogleSearch
-        search = GoogleSearch(params)
-        res = search.get_dict()
-
-    # google 搜索 evidence。简单过滤掉 fact-checking 的网址。
-    answers = []
-    if "organic_results" in res.keys():
-        for idx in range(len(res["organic_results"])):
-            if 'snippet' in res["organic_results"][idx].keys():
-                if is_social_media(res["organic_results"][idx]['link']) :
-                    continue
-                toret = res["organic_results"][idx]['snippet']
-                answers.append(toret)
-            if (idx + 1) == len(res["organic_results"]):
-                toret = None
-    else:
-        toret = None
-    # return toret
-    return answers[:5]
 
 
 def disambiguate(claim):
@@ -251,67 +160,9 @@ def extract_questions(response):
     return claim, subclaims, questions
 
 
-def factchecking_LIAR_RAW(claim, responses):
-    questions = []
-    answers = []
-    for q in responses['questions']:
-        questions.append(q['question'])
-        qq = q['question'].split("{answer_")[0]
-        print(q['subject'], "\n", qq)
-        ans = get_answer(qq)
-        answers = answers + ans
-    answers_str = "\n".join(['- ' + a for a in answers])
-    questions_str = "\n".join(questions)
-    subclaims_str = "\n".join(responses['subclaims'])
-    prompt = ("""Verify the following claim.
-
-Use the Truth-O-Meter to reflect the relative accuracy of the claim. The meter has six ratings, in decreasing level of truthfulness:
-- TRUE : The claim is accurate and there’s nothing significant missing.
-- MOSTLY TRUE : The claim is accurate but needs clarification or additional information.
-- HALF TRUE : The claim is partially accurate but leaves out important details or takes things out of context.
-- MOSTLY FALSE : The claim contains an element of truth but ignores critical facts that would give a different impression.
-- FALSE : The claim is not accurate.
-- PANTS ON FIRE : The claim is not accurate and makes a ridiculous claim. 
-
-Instructions: 
-- Replace the variables in the subclaim with the correct answer based on what is in the EVIDENCE.
-- Fact-check each suclaim and label it as a label in the Truth-O-Meter.
-- Based on the validation results of each subclaim, give the final result for this claim.
-
-Format your response as a dictionary with the following structure: 
-{"subclaim_ratings": [{"subclaim": <subclaim-1>, "rating": <rating-1>, "explanation": <explanation-1>}, {"subclaim": <subclaim-1>, "rating": <rating-1>, "explanation": <explanation-1>}], "final_rating": <final rating>, "explanation": <overall explanation>}
-
-Example:
-##CLAIM##: The Rodney King riots took place in the most populous county in the USA.
-##QUESTIONS##:
-Where did The Rodney King riots take place? {answer_1}
-##SUBCLAIMS##:
-The Rodney King riots took place in {answer_1}.
-{answer_1} is the most populous county in the USA.
-##EVIDENCE##:
-- The riots first began at an intersection in South Los Angeles — Florence and Normandie — according to news reports and firsthand accounts in the ...
-- Emotions were still running high more than a year later during the trial of the officers conducted in Simi Valley, a suburb of Los Angeles. On ...
-- Lake View Terrace: Rodney King beating ... On March 3, 1991, police arrested Rodney King at the intersection of Foothill Boulevard and Osborne ...
-- The officers' trial is moved to Simi Valley, a nearly all-white suburb 30 miles north of downtown Los Angeles that is home to a large number of L.A. police ...
-- May 1, 1992, 3 p.m.: West of Koreatown, in Beverly Hills, Rodney King appeared outside his lawyer's office for a news conference. Quiet and ...
-##RESPONSE##: 
-{"subclaim_ratings": [{"subclaim": "The Rodney King riots took place in Los Angeles.", "rating": "TRUE", "explanation": "The evidence consistently indicates that the Rodney King riots took place in Los Angeles."}, {"subclaim": "Los Angeles is the most populous county in the USA.", "rating": "TRUE", "explanation": "Los Angeles County is indeed the most populous county in the United States."}], "final_rating": "TRUE", "explanation": "Given that both subclaims are rated as TRUE, the overall claim is also rated as: TRUE"}
-
-##CLAIM##: [claim]
-##QUESTIONS##:
-[questions]
-##SUBCLAIMS##:
-[subclaims]
-##EVIDENCE##:
-[evidence]
-##RESPONSE##:""".replace("[claim]", claim)
-              .replace("[questions]", questions_str)
-              .replace("[subclaims]", subclaims_str).
-              replace("[evidence]", answers_str))
-    return call_gpt(prompt)
 
 
-def factchecking_RAWFC(claim, questions, subclaims, evidence_list):
+def factchecking(claim, questions, subclaims, evidence_list):
     answers_str = "\n".join(['- ' + a for a in evidence_list])
     questions_str = "\n".join(questions)
     subclaims_str = "\n".join(subclaims)
@@ -357,127 +208,9 @@ The Rodney King riots took place in {answer_1}.
     return call_gpt(prompt)
 
 
-def read_res(res_file):
-    with open(res_file, 'r') as f:
-        text = f.read()
-    arr = text.split("---------------------")
-    json_str = arr[3]
-    if json_str.find('```json') > -1:
-        json_str = json_str.replace("```json", "").replace('```', '')
-    pred = json.loads(json_str)['final_rating']
-    return pred
-
-
-def num_label(label):
-    l = label.strip().lower()
-    d = {
-        'true': 0,
-        'TRUE': 0,
-
-        'half-true': 1,
-        'HALF TRUE': 1,
-        'MIXTRUE': 1,
-        'mixture': 1,
-        'half': 1,
-        'half true': 1,
-
-        'false': 2,
-        'FALSE': 2,
-
-        'mostly-true': 3,
-        'MOSTLY TRUE': 3,
-        'mostly true': 3,
-
-        'barely-true': 4,
-        'MOSTLY FALSE': 4,
-        'mostly false': 4,
-
-        'pants-fire': 5,
-        'pants on fire': 5,
-        'PANTS ON FIRE': 5
-    }
-    return d[l]
-
-
-def test_LIAR_RAW(now_time):
-    dataset_path = './data/LIAR-RAW/test.json'
-
-    log_path = f'./log/{now_time}/LIAR-RAW/'
-    if not os.path.exists(log_path):
-        os.makedirs(log_path)
-
-    my_log('=== start ' + log_path)
-
-    with open(dataset_path, 'r') as json_file:
-        json_list = json.load(json_file)
-
-    for item in tqdm(json_list):
-        label = item["label"]
-        claim = item["claim"]
-        idx = item["event_id"]
-
-        to_file = os.path.join(log_path, str(idx) + '.txt')
-        if os.path.exists(to_file):
-            continue
-
-        try:
-            print('---------- idx ----------')
-            print(str(idx) + '\n')
-
-            # claim = "Georgia has had ʺmore bank failures than any other state.ʺ"
-            res1 = decompose(claim)
-            responses = res1.split("##RESPONSE##:")[-1].strip()
-            responses = json.loads(responses)
-            res2 = factchecking_LIAR_RAW(claim, responses)
-
-            with open(to_file, 'w') as f:
-                f.write(res1)
-                f.write('---------------------\n')
-                f.write(res2)
-                f.write('---------------------\n')
-                f.write("ground truth: {}".format(label))
-            print("saved to", to_file)
-        except Exception as e:
-            my_log("-- error: {}, idx: {}".format(str(e), idx))
-
-
-def eval_LIAR_RAW(runtime=''):
-    dataset_name = 'LIAR-RAW'
-    dataset_path = './data/{}/test.json'.format(dataset_name)
-    if runtime == '':
-        runtime = '2024-08-02-22-36'
-    results_path = 'log/{}/{}/'.format(runtime, dataset_name)
-
-    with open(dataset_path, 'r') as json_file:
-        json_list = json.load(json_file)
-
-    y_pred = []
-    y_true = []
-    for result in json_list:
-        label = result["label"]
-        claim = result["claim"]
-        idx = result["event_id"]
-
-        res_file = os.path.join(results_path, str(idx) + '.txt')
-        if not os.path.exists(res_file):
-            continue
-        print(res_file)
-        pred = read_res(res_file)
-        if pred is None:
-            print("Error: the pred is None")
-            exit()
-        print(claim, '\n', label, pred, '\n')
-        y_true.append(num_label(label))
-        y_pred.append(num_label(pred))
-
-    target_names = ['true', 'half-true', 'false', 'mostly-true', 'barely-true', 'pants-fire']
-    report_txt = classification_report(y_true, y_pred, digits=4, target_names=target_names, output_dict=False,
-                                       zero_division=1)
-    print(report_txt)
-
 
 def wikidata_search(query):
-    # 如果缓存中没有结果，调用API进行搜索
+    # If there are no results in the cache, call the API to perform the search.
     service_url = 'https://www.wikidata.org/w/api.php'
     params = {
         'action': 'wbsearchentities',
@@ -504,7 +237,7 @@ def wikidata_search(query):
         print(str(e))
     return None
 
-def test_RAWFC(now_time):
+def test_RAWFC_open_book(now_time):
     dataset_path = './data/RAWFC/test'
 
     log_path = f'./log/{now_time}/RAWFC/'
@@ -546,21 +279,21 @@ def test_RAWFC(now_time):
                     query = q
                     flag_searched = False
 
-                    # 正则表达式提取变量
+                    # Extract variables using regular expressions.
                     pattern = r'\{[^}]*\}'
                     matches = re.findall(pattern, q)
 
                     for m in matches:
-                        # 如果问题中存在已知答案，把它替换
+                        # If a known answer exists in the question, replace it.
                         if m in answers.keys():
                             query = q.replace(m, answers[m])
                             continue
 
-                        # 如果存在未知变量，搜索答案
+                        # If there are unknown variables, search for the answers.
                         query = q.replace(m, "")
                         ans = 'unknown'
 
-                        # Google 搜索答案。排名考前的搜索结果优先，一旦找到答案就不再管后面的evidence。
+                        # Use Google to search for the answer. Prioritize the top-ranked search results, and stop checking further evidence once the answer is found.
                         flag_searched = True
                         search_res = get_answer(query)
                         for evidence in search_res:
@@ -574,8 +307,7 @@ def test_RAWFC(now_time):
                         if ans == 'unknown':
                             evidence_list.append(search_res[0])
 
-                    # 如果没被搜索过，说明这是一个不含变量的问题
-                    # 以第一个搜索结果为主
+                    # If it hasn’t been searched before, it indicates that this is a question without variables.
                     if not flag_searched:
                         search_res = get_answer(query)
                         evidence_list.append(search_res[0])
@@ -588,7 +320,7 @@ def test_RAWFC(now_time):
                 for e in evidence_list:
                     print(e)
 
-                resp2 = factchecking_RAWFC(claim, questions, subclaims, evidence_list)
+                resp2 = factchecking(claim, questions, subclaims, evidence_list)
                 with open(to_file, 'w') as f:
                     f.write(resp)
                     f.write('---------------------\n')
@@ -604,7 +336,7 @@ def test_RAWFC(now_time):
                 my_log("-- error: {}, idx: {}".format(str(e), idx))
 
 
-def eval_RAWFC(runtime=''):
+def eval_RAWFC_open_book(runtime=''):
     dataset_name = 'RAWFC'
     dataset_path = './data/{}/test'.format(dataset_name)
 
@@ -645,7 +377,7 @@ def eval_RAWFC(runtime=''):
     print(report_txt)
 
 
-def test_one_RAWFC(claim):
+def test_one_sample(claim):
     resp = decompose(claim)
     _, subclaims, questions = extract_questions(resp)
 
@@ -657,21 +389,21 @@ def test_one_RAWFC(claim):
         query = q
         flag_searched = False
 
-        # 正则表达式提取变量
+        # Extract variables using regular expressions.
         pattern = r'\{[^}]*\}'
         matches = re.findall(pattern, q)
 
         for m in matches:
-            # 如果问题中存在已知答案，把它替换
+            # If a known answer exists in the question, replace it.
             if m in answers.keys():
                 query = q.replace(m, answers[m])
                 continue
 
-            # 如果存在未知变量，搜索答案
+            # If there are unknown variables, search for the answers.
             query = q.replace(m, "")
             ans = 'unknown'
 
-            # Google 搜索答案。排名考前的搜索结果优先，一旦找到答案就不再管后面的evidence。
+            # Use Google to search for the answer. Prioritize the top-ranked search results, and stop checking further evidence once the answer is found.
             flag_searched = True
             search_res = get_answer(query)
             for evidence in search_res:
@@ -685,8 +417,7 @@ def test_one_RAWFC(claim):
             if ans == 'unknown':
                 evidence_list.append(search_res[0])
 
-        # 如果没被搜索过，说明这是一个不含变量的问题
-        # 以第一个搜索结果为主
+        # If it hasn’t been searched before, it indicates that this is a question without variables.
         if not flag_searched:
             search_res = get_answer(query)
             evidence_list.append(search_res[0])
@@ -699,9 +430,156 @@ def test_one_RAWFC(claim):
     for e in evidence_list:
         print(e)
 
-    resp2 = factchecking_RAWFC(claim, questions, subclaims, evidence_list)
+    resp2 = factchecking(claim, questions, subclaims, evidence_list)
+
+def read_prompt(file='prompts/FactChecking.md'):
+    with open(file, 'r') as f:
+        content = f.read()
+
+    # Define regular expressions to match the content from System and User.
+    system_pattern = r"System:\n(.*?)\nUser:"
+    user_pattern = r"User:\n(.*?)$"
+
+    # Use re.DOTALL to allow matching newline characters.
+    system_match = re.search(system_pattern, content, re.DOTALL)
+    user_match = re.search(user_pattern, content, re.DOTALL)
+
+    # Extract the content; if no match is found, set the result to None.
+    system_text = system_match.group(1).strip() if system_match else None
+    user_text = user_match.group(1).strip() if user_match else None
+
+    return system_text, user_text
+
+class FCResponse(BaseModel):
+    Label: str
+    Steps: list[str]
+
+
+def factchecking_RAWFC(claim, evidence_list, hparams=None):
+    if hparams.prompt_mode == 'Markdown':
+        evidence_str = "\n".join(['- ' + a for a in evidence_list])
+        system_text, user_text = read_prompt('prompts/FactChecking.md')
+        user_text = user_text.replace("[Claim]", claim).replace("[Evidence]", evidence_str)
+        event = call_gpt(system_text, user_text)
+    elif hparams.prompt_mode == 'JSON':
+        evidence_str = json.dumps(evidence_list, indent=4)
+        system_text, user_text = read_prompt('prompts/FactChecking.json')
+        user_text = user_text.replace("[Claim]", claim).replace("[Evidence]", evidence_str)
+        event = call_gpt(system_text, user_text)
+    elif hparams.prompt_mode == 'YAML':
+        evidence_str = "\n".join(['- ' + a for a in evidence_list])
+        system_text, user_text = read_prompt('prompts/FactChecking.yaml')
+        user_text = user_text.replace("[Claim]", claim).replace("[Evidence]", evidence_str)
+        event = call_gpt(system_text, user_text)
+    else: # Plaintext
+        evidence_str = "\n".join(evidence_list)
+        system_text, user_text = read_prompt('prompts/FactChecking.txt')
+        user_text = user_text.replace("[Claim]", claim).replace("[Evidence]", evidence_str)
+        event = call_gpt(system_text, user_text)
+
+    return event, system_text, user_text
+
+def test_RAWFC_gold(now_time, hparams):
+    dataset_path = './data/RAWFC/test'
+
+    log_path = f'./log/{now_time}/RAWFC/'
+    if not os.path.exists(log_path):
+        os.makedirs(log_path)
+
+    my_log('=== start ' + log_path)
+
+    gold_evidence_length = []
+
+    filelist = [f for f in os.listdir(dataset_path)]
+    for ff in tqdm(filelist):
+        full_path = os.path.join(dataset_path, ff)
+        if os.path.isdir(full_path):
+            continue
+        if ff.endswith('.json'):
+            with open(full_path, 'r') as json_file:
+                item = json.load(json_file)
+
+            label = item["label"]
+            claim = item["claim"]
+            idx = item["event_id"]
+
+            to_file = os.path.join(log_path, str(idx) + '.txt')
+            if os.path.exists(to_file):
+                continue
+
+            # Gold Evidence
+            evidence_list = []
+            for report in item['reports']:
+                for s in report['tokenized']:
+                    if s['is_evidence'] > 0 and len(evidence_list) < 40:
+                        evidence_list.append(s['sent'])
+            # gold_evidence_length.append(len(evidence_list))
+
+            try:
+                print('---------- idx ----------')
+                print(str(idx) + '\n')
+
+                # claim = "Georgia has had ʺmore bank failures than any other state.ʺ"
+                resp = decompose(claim)
+                _, subclaims, questions = extract_questions(resp)
+
+                resp2 = factchecking_RAWFC(claim, questions, subclaims, evidence_list)
+                with open(to_file, 'w') as f:
+                    f.write(resp)
+                    f.write('---------------------\n')
+                    f.write(resp2)
+                    f.write('---------------------\n')
+                    f.write("ground truth: {}".format(label))
+                print("saved to", to_file)
+            except Exception as e:
+                my_log("-- error: {}, idx: {}".format(str(e), idx))
+
+
+
+def eval_RAWFC_gold(runtime='', hparams=None):
+    dataset_name = 'RAWFC'
+    dataset_path = './data/{}/test'.format(dataset_name)
+
+    results_path = 'log/{}/{}/'.format(runtime, dataset_name)
+
+    y_pred = []
+    y_true = []
+    filelist = [f for f in os.listdir(dataset_path)]
+    for ff in filelist:
+        full_path = os.path.join(dataset_path, ff)
+        if os.path.isdir(full_path):
+            continue
+        if ff.endswith('.json'):
+            with open(full_path, 'r') as json_file:
+                item = json.load(json_file)
+
+            label = item["label"]
+            claim = item["claim"]
+            idx = item["event_id"]
+
+            res_file = os.path.join(results_path, str(idx) + '.txt')
+            if not os.path.exists(res_file):
+                continue
+            print(res_file)
+            pred = read_res(res_file)
+            if pred is None:
+                print("Error: the pred is None")
+                exit()
+            print(claim, '\n', label, pred, '\n')
+            y_true.append(num_label(label))
+            y_pred.append(num_label(pred))
+
+    target_names = ['true', 'mixtrue', 'false']
+    print(y_pred)
+    print(y_true)
+    report_txt = classification_report(y_true, y_pred, digits=4, target_names=target_names, output_dict=False,
+                                       zero_division=1)
+    print(report_txt)
+
 
 if __name__ == '__main__':
+
+
     parser = argparse.ArgumentParser(
         description="D2F",
         add_help=True,
@@ -721,17 +599,45 @@ if __name__ == '__main__':
         required=False,
         help="data_set: [LIAR_RAW, RAWFC]"
     )
+    parser.add_argument(
+        "--experiment_name",
+        default="D2F",
+        type=str,
+        required=False,
+    )
+    parser.add_argument(
+        "--evidence_mode",
+        default="Search",
+        type=str,
+        choices=["Internal", "Gold", "KP", "Search"],
+        required=False,
+        help="evidence_mode: [Internal, Gold, KP]"
+    )
+    parser.add_argument(
+        "--prompt_mode",
+        default="Markdown",
+        type=str,
+        choices=["Markdown", "JSON", "YAML", "PlainText"],
+        required=False,
+        help="prompt_mode: [Markdown, JSON, YAML, PlainText]"
+    )
+
     hparams = parser.parse_args()
+
+    hparams.cache_path = "data/google_search_cache"
+    os.makedirs(hparams.cache_path, exist_ok=True)
+
+
+    if hparams.experiment_name == '':
+        hparams.experiment_name = "D2F"
     if hparams.now_time == "":
-        now_time = datetime.now().strftime('%Y-%m-%d-%H-%M')
-    else:
-        now_time = hparams.now_time
+        hparams.now_time = datetime.now().strftime('%Y-%m-%d-%H-%M')
 
-    if hparams.data_set == 'LIAR_RAW':
-        test_LIAR_RAW(now_time)
-        eval_LIAR_RAW(now_time)
-    else:
-        test_RAWFC(now_time)
-        eval_RAWFC(now_time)
+    hparams.log_path = os.path.join(f'log/{hparams.experiment_name}/{hparams.now_time}_{hparams.data_set}/')
+    os.makedirs(hparams.log_path, exist_ok=True)
 
+    if hparams.data_set == 'RAWFC':
+        test_RAWFC_gold(hparams.now_time, hparams)
+        eval_RAWFC_gold(hparams.now_time, hparams)
 
+    print("done")
